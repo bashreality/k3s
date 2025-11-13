@@ -93,36 +93,27 @@ spec:
   #   enabled: true
   #   podMonitorEnabled: true
 
----
-# Service dla primary (dla kompatybilności z istniejącym kodem)
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres-primary
-  namespace: plusworkflow
-spec:
-  type: LoadBalancer
-  selector:
-    cnpg.io/cluster: postgres-cluster
-    role: primary
-  ports:
-    - port: 5432
-      targetPort: 5432
-      name: postgres
-
----
-# Service dla wszystkich instancji (headless)
-# CloudNativePG tworzy własny service, ale dodajemy ten dla kompatybilności
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-  namespace: plusworkflow
-spec:
-  clusterIP: None
-  selector:
-    cnpg.io/cluster: postgres-cluster
-  ports:
-    - port: 5432
-      name: postgres
+# UWAGA: CloudNativePG automatycznie tworzy następujące serwisy:
+# - postgres-cluster-rw   (read-write, wskazuje na primary)
+# - postgres-cluster-ro   (read-only, wskazuje na replicas)
+# - postgres-cluster-r    (read, dla replikacji)
+#
+# Aby połączyć się z bazą, użyj:
+#   postgres-cluster-rw.plusworkflow.svc.cluster.local:5432
+#
+# Jeśli potrzebujesz LoadBalancer lub NodePort, utwórz osobny Service
+# wskazujący na postgres-cluster-rw, np:
+#
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: postgres-lb
+# spec:
+#   type: LoadBalancer
+#   selector:
+#     cnpg.io/cluster: postgres-cluster
+#     cnpg.io/instanceRole: primary
+#   ports:
+#     - port: 5432
+#       targetPort: 5432
 

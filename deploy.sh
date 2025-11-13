@@ -241,14 +241,27 @@ deploy_all() {
     fi
     print_success "Sekrety utworzone"
     
-    # 3. PostgreSQL Services
-    print_info "3/8 Tworzenie serwisów PostgreSQL..."
-    kubectl apply -f manifest-03-postgres-services.yaml
-    print_success "Serwisy PostgreSQL utworzone"
-    
+    # 3. PostgreSQL Services - tylko dla starego StatefulSet
+    # CloudNativePG tworzy własne serwisy automatycznie
+
     # 4. PostgreSQL - sprawdź czy używać CloudNativePG czy StatefulSet
     if [ -f "manifest-10-postgres-cloudnativepg.yaml" ] && kubectl get crd clusters.postgresql.cnpg.io &> /dev/null 2>&1; then
         print_info "4/8 Tworzenie CloudNativePG Cluster PostgreSQL..."
+
+        # Sprawdź konflikty ze starym StatefulSet
+        if kubectl get statefulset postgres -n $NAMESPACE &> /dev/null 2>&1; then
+            print_error "KONFLIKT: Stary StatefulSet 'postgres' już istnieje!"
+            print_warning "CloudNativePG Cluster i stary StatefulSet nie mogą działać jednocześnie."
+            print_warning "Powoduje to konflikty nazw serwisów, portów i PVC."
+            echo ""
+            print_info "Uruchom skrypt migracji:"
+            echo "  ./migrate-to-cloudnativepg.sh"
+            echo ""
+            print_info "Lub usuń ręcznie stary StatefulSet:"
+            echo "  kubectl delete statefulset postgres -n $NAMESPACE"
+            echo "  kubectl delete svc postgres postgres-primary -n $NAMESPACE"
+            return 1
+        fi
 
         # Kompleksowe sprawdzenie gotowości CloudNativePG
         if ! check_cloudnativepg_ready; then
@@ -302,6 +315,10 @@ deploy_all() {
             fi
         fi
     else
+        print_info "3/8 Tworzenie serwisów PostgreSQL (stary StatefulSet)..."
+        kubectl apply -f manifest-03-postgres-services.yaml
+        print_success "Serwisy PostgreSQL utworzone"
+
         print_info "4/8 Tworzenie StatefulSet PostgreSQL..."
         kubectl apply -f manifest-04-postgres-statefulset.yaml
         print_success "StatefulSet PostgreSQL utworzony"
