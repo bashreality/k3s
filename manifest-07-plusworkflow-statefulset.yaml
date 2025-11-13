@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: plusworkflow
+  namespace: plusworkflow
+spec:
+  serviceName: plusworkflow
+  replicas: 3
+  selector:
+    matchLabels:
+      app: plusworkflow
+  template:
+    metadata:
+      labels:
+        app: plusworkflow
+    spec:
+      imagePullSecrets:
+        - name: nexus-registry-secret
+
+      initContainers:
+        - name: wait-for-db
+          image: postgres:15-alpine
+          command:
+            - 'sh'
+            - '-c'
+            - |
+              echo "Czekam na PostgreSQL..."
+              until pg_isready -h postgres-0.postgres -U postgres; do
+                echo "PostgreSQL nie gotowy, czekam..."
+                sleep 3
+              done
+              echo "PostgreSQL gotowy!"
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+        
+        - name: fix-permissions
+          image: busybox:1.36
+          command: ['sh', '-c', 'chmod -R 777 /data || true']
+          volumeMounts:
+            - name: plusworkflow-storage
+              mountPath: /data
+          securityContext:
+            runAsUser: 0
+
+      containers:
+        - name: plusworkflow
+          image: docker.nexus.test.plusworkflow.pl/redhat:min
+          imagePullPolicy: Always
+          command:
+            - '/bin/bash'
+            - '-c'
+            - |
+              echo "Startuje Tomcat..."
+              cd /usr/local/tomcat/bin
+              exec ./catalina.sh run
+          env:
+            - name: CATALINA_OPTS
+              value: "-Xmx2G -Xms512M"
+            - name: PWFL_DB_HOST
+              value: "postgres-cluster-rw"  # CloudNativePG tworzy service z sufiksem -rw dla primary
+              # Dla StatefulSet użyj: "postgres-0.postgres"
+              # Dla CloudNativePG użyj: "postgres-cluster-rw"
+            - name: PWFL_DB_PORT
+              value: "5432"
+            - name: PWFL_DB_TYPE
+              value: "PostgreSQL"
+            - name: PWFL_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: database
+            - name: PWFL_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: username
+            - name: PWFL_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+            - name: PWFL_DB_JDBC_PARAMS
+              value: "?sslmode=disable&tcpKeepAlive=true&socketTimeout=0&connectTimeout=60&loginTimeout=60"
+          volumeMounts:
+            - name: plusworkflow-storage
+              mountPath: /usr/local/tomcat/webapps/PlusWorkflow Home
+            - name: server-xml
+              mountPath: /usr/local/tomcat/conf/server.xml
+              subPath: server.xml
+              readOnly: true
+          ports:
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          startupProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 100
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+      volumes:
+        - name: server-xml
+          configMap:
+            name: tomcat-server-config
+  volumeClaimTemplates:
+    - metadata:
+        name: plusworkflow-storage
+      spec:
+        accessModes: ["ReadWriteMany"]  # RWX - współdzielony volume dla wszystkich instancji
+        storageClassName: longhorn  # Longhorn obsługuje RWX (zainstaluj: kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/v1.5.3/deploy/longhorn.yaml)
+        resources:
+          requests:
+            storage: 10Gi

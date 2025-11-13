@@ -1,0 +1,155 @@
+# Proste rozwiązanie replikacji PostgreSQL bez operatora
+# Używa streaming replication z sidecar container
+# 
+# UWAGA: To jest alternatywa dla Zalando Operator - prostsza, ale wymaga ręcznej konfiguracji
+# 
+# Instalacja:
+# 1. Najpierw usuń obecny StatefulSet PostgreSQL (zachowaj PVC jeśli chcesz zachować dane)
+# 2. Zastosuj ten manifest
+# 3. Pierwszy pod (postgres-0) będzie primary, pozostałe będą replicas
+#
+# Wymagania:
+# - Storage class obsługujący ReadWriteOnce (local-path działa)
+# - Więcej zasobów dla replikacji (min. 1GB RAM per replica)
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-replicated
+  namespace: plusworkflow
+spec:
+  serviceName: postgres
+  replicas: 3
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        fsGroup: 999
+        runAsUser: 999
+        runAsNonRoot: true
+      initContainers:
+        # Init container do konfiguracji replikacji
+        - name: setup-replication
+          image: postgres:15-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              
+              # Sprawdź czy to pierwszy pod (primary)
+              HOSTNAME=$(hostname)
+              POD_INDEX=${HOSTNAME##*-}
+              
+              if [ "$POD_INDEX" = "0" ]; then
+                echo "Konfiguruję jako PRIMARY"
+                # Primary - konfiguruj streaming replication
+                mkdir -p /var/lib/postgresql/data/pgdata
+                chown -R 999:999 /var/lib/postgresql/data
+              else
+                echo "Konfiguruję jako REPLICA"
+                # Replica - czekaj na primary i skonfiguruj recovery
+                until pg_isready -h postgres-0.postgres -U postgres; do
+                  echo "Czekam na primary..."
+                  sleep 2
+                done
+                
+                # Utwórz recovery.conf dla streaming replication
+                mkdir -p /var/lib/postgresql/data/pgdata
+                cat > /var/lib/postgresql/data/pgdata/recovery.conf <<EOF
+standby_mode = 'on'
+primary_conninfo = 'host=postgres-0.postgres port=5432 user=replicator password=replicator_password'
+trigger_file = '/var/lib/postgresql/data/pgdata/failover.trigger'
+EOF
+                chown -R 999:999 /var/lib/postgresql/data
+              fi
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+          securityContext:
+            runAsUser: 0  # Potrzebne do chown
+      
+      containers:
+        - name: postgres
+          image: postgres:15-alpine
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # Konfiguracja replikacji dla primary
+            - name: POSTGRES_INITDB_ARGS
+              value: "-c wal_level=replica -c max_wal_senders=3 -c max_replication_slots=3"
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              memory: "1Gi"  # Zwiększone dla replikacji
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U postgres
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U postgres
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 20Gi
+
+---
+# UWAGA: To rozwiązanie wymaga dodatkowej konfiguracji:
+# 1. Utworzenie użytkownika replicator w PostgreSQL:
+#    CREATE USER replicator WITH REPLICATION PASSWORD 'replicator_password';
+# 2. Konfiguracja pg_hba.conf dla replikacji
+# 3. Ręczne zarządzanie failover (brak automatycznego)
+#
+# Dla produkcji rozważ CloudNativePG operator (prostszy niż Zalando):
+# https://cloudnative-pg.io/
+

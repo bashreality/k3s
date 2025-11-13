@@ -1,0 +1,143 @@
+# CronJob do automatycznych backupów PostgreSQL
+# Tworzy dump bazy danych codziennie o 2:00
+# Backupy są przechowywane w PVC
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backup-storage
+  namespace: plusworkflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 50Gi  # Rozmiar zależy od rozmiaru bazy i retencji backupów
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: plusworkflow
+spec:
+  schedule: "0 2 * * *"  # Codziennie o 2:00
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: postgres-backup
+              image: postgres:15-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -e
+                  BACKUP_DIR="/backups"
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  BACKUP_FILE="${BACKUP_DIR}/plusworkflow_${TIMESTAMP}.sql.gz"
+                  
+                  echo "Rozpoczynam backup bazy danych..."
+                  
+                  # Utwórz backup
+                  pg_dump -h postgres-0.postgres \
+                    -U postgres \
+                    -d plusworkflow \
+                    | gzip > "${BACKUP_FILE}"
+                  
+                  # Sprawdź czy backup się powiódł
+                  if [ $? -eq 0 ]; then
+                    echo "Backup zakończony pomyślnie: ${BACKUP_FILE}"
+                    ls -lh "${BACKUP_FILE}"
+                    
+                    # Usuń backupy starsze niż 30 dni
+                    find "${BACKUP_DIR}" -name "plusworkflow_*.sql.gz" -mtime +30 -delete
+                    echo "Usunięto backupy starsze niż 30 dni"
+                  else
+                    echo "BŁĄD: Backup nie powiódł się!"
+                    exit 1
+                  fi
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-secret
+                      key: password
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backups
+              resources:
+                requests:
+                  memory: "512Mi"
+                  cpu: "250m"
+                limits:
+                  memory: "1Gi"
+                  cpu: "1000m"
+          volumes:
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: postgres-backup-storage
+          restartPolicy: OnFailure
+
+---
+# Ręczny backup (Job do uruchomienia na żądanie)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-backup-manual
+  namespace: plusworkflow
+spec:
+  template:
+    spec:
+      containers:
+        - name: postgres-backup
+          image: postgres:15-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              BACKUP_DIR="/backups"
+              TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+              BACKUP_FILE="${BACKUP_DIR}/plusworkflow_manual_${TIMESTAMP}.sql.gz"
+              
+              echo "Rozpoczynam ręczny backup bazy danych..."
+              
+              pg_dump -h postgres-0.postgres \
+                -U postgres \
+                -d plusworkflow \
+                | gzip > "${BACKUP_FILE}"
+              
+              if [ $? -eq 0 ]; then
+                echo "Backup zakończony pomyślnie: ${BACKUP_FILE}"
+                ls -lh "${BACKUP_FILE}"
+              else
+                echo "BŁĄD: Backup nie powiódł się!"
+                exit 1
+              fi
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: password
+          volumeMounts:
+            - name: backup-storage
+              mountPath: /backups
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+      volumes:
+        - name: backup-storage
+          persistentVolumeClaim:
+            claimName: postgres-backup-storage
+      restartPolicy: Never
+

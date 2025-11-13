@@ -1,0 +1,128 @@
+# CloudNativePG Cluster - PostgreSQL z automatyczną replikacją
+# 
+# Wymagania:
+# 1. CloudNativePG Operator musi być zainstalowany:
+#    ./install-cloudnativepg.sh
+#    lub
+#    kubectl apply -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.22/releases/cnpg-1.22.0.yaml
+#
+# 2. Secret postgres-secret musi istnieć (używa tego samego co StatefulSet)
+#
+# Funkcjonalności:
+# - Automatyczna replikacja (streaming replication)
+# - Automatyczny failover
+# - Backup i restore (wbudowane)
+# - Monitoring i health checks
+#
+# Instalacja:
+# kubectl apply -f manifest-10-postgres-cloudnativepg.yaml
+
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres-cluster
+  namespace: plusworkflow
+spec:
+  # Liczba instancji (1 primary + 2 replicas)
+  instances: 3
+  
+  # Konfiguracja PostgreSQL
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "256MB"
+      effective_cache_size: "1GB"
+      maintenance_work_mem: "64MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      default_statistics_target: "100"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      work_mem: "4MB"
+      min_wal_size: "1GB"
+      max_wal_size: "4GB"
+      max_worker_processes: "4"
+      max_parallel_workers_per_gather: "2"
+      max_parallel_workers: "4"
+      max_parallel_maintenance_workers: "2"
+  
+  # Image PostgreSQL
+  imageName: postgres:15-alpine
+  
+  # Bootstrap - używa secret typu kubernetes.io/basic-auth
+  # Secret musi mieć klucze: username i password
+  bootstrap:
+    initdb:
+      database: plusworkflow
+      owner: postgres
+      secret:
+        name: postgres-secret-cnpg  # CloudNativePG wymaga secret typu kubernetes.io/basic-auth
+  
+  # Storage
+  storage:
+    size: 20Gi
+    storageClass: local-path  # Zmień na longhorn jeśli chcesz użyć Longhorn
+  
+  # Zasoby
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "2000m"
+  
+  # Backup (opcjonalne - można skonfigurować później)
+  # backup:
+  #   barmanObjectStore:
+  #     destinationPath: "s3://backup-bucket/postgres"
+  #     s3Credentials:
+  #       accessKeyId:
+  #         name: backup-credentials
+  #         key: ACCESS_KEY_ID
+  #       secretAccessKey:
+  #         name: backup-credentials
+  #         key: SECRET_ACCESS_KEY
+  #     wal:
+  #       retention: "7d"
+  #     data:
+  #       retention: "30d"
+  
+  # Monitoring (opcjonalne)
+  # monitoring:
+  #   enabled: true
+  #   podMonitorEnabled: true
+
+---
+# Service dla primary (dla kompatybilności z istniejącym kodem)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+  namespace: plusworkflow
+spec:
+  type: LoadBalancer
+  selector:
+    cnpg.io/cluster: postgres-cluster
+    role: primary
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: postgres
+
+---
+# Service dla wszystkich instancji (headless)
+# CloudNativePG tworzy własny service, ale dodajemy ten dla kompatybilności
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: plusworkflow
+spec:
+  clusterIP: None
+  selector:
+    cnpg.io/cluster: postgres-cluster
+  ports:
+    - port: 5432
+      name: postgres
+

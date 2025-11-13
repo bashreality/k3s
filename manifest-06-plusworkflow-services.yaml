@@ -1,0 +1,30 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plusworkflow
+  namespace: plusworkflow
+spec:
+  clusterIP: None
+  selector:
+    app: plusworkflow
+  ports:
+    - port: 8080
+      name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plusworkflow-lb
+  namespace: plusworkflow
+spec:
+  type: LoadBalancer
+  selector:
+    app: plusworkflow
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+  sessionAffinity: ClientIP
