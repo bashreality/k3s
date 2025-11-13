@@ -120,9 +120,9 @@ wait_for_statefulset() {
     local statefulset_name=$1
     local replicas=${2:-1}
     local timeout=${3:-$TIMEOUT}
-    
+
     print_info "Czekam na StatefulSet: $statefulset_name (replicas: $replicas)..."
-    
+
     local elapsed=0
     while [ $elapsed -lt $timeout ]; do
         local ready=$(kubectl get statefulset $statefulset_name -n $NAMESPACE -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
@@ -134,10 +134,89 @@ wait_for_statefulset() {
         elapsed=$((elapsed + 5))
         echo -n "."
     done
-    
+
     echo ""
     print_error "StatefulSet $statefulset_name nie jest gotowy w czasie ${timeout}s"
     return 1
+}
+
+check_cloudnativepg_ready() {
+    print_info "Sprawdzam gotowość CloudNativePG Operator..."
+
+    # 1. Sprawdź namespace
+    if ! kubectl get namespace cnpg-system &> /dev/null; then
+        print_error "Namespace cnpg-system nie istnieje!"
+        print_info "CloudNativePG Operator nie jest zainstalowany. Uruchom: ./install-cloudnativepg.sh"
+        return 1
+    fi
+
+    # 2. Sprawdź deployment operatora
+    if ! kubectl get deployment cnpg-controller-manager -n cnpg-system &> /dev/null; then
+        print_error "Deployment cnpg-controller-manager nie istnieje!"
+        print_info "Operator nie został poprawnie zainstalowany. Uruchom: ./reinstall-cloudnativepg.sh"
+        return 1
+    fi
+
+    # 3. Sprawdź czy deployment jest ready
+    print_info "Czekam na gotowość deployment operatora (timeout: 120s)..."
+    if ! kubectl wait --for=condition=available deployment/cnpg-controller-manager -n cnpg-system --timeout=120s 2>/dev/null; then
+        print_error "Deployment cnpg-controller-manager nie jest ready!"
+        print_info "Sprawdź status: kubectl get deployment -n cnpg-system"
+        print_info "Sprawdź pody: kubectl get pods -n cnpg-system"
+        print_info "Sprawdź logi: kubectl logs -n cnpg-system deployment/cnpg-controller-manager"
+        return 1
+    fi
+
+    # 4. Sprawdź pody
+    local pod_count=$(kubectl get pods -n cnpg-system -l app.kubernetes.io/name=cloudnative-pg --field-selector=status.phase=Running 2>/dev/null | grep -c Running || echo "0")
+    if [ "$pod_count" -eq 0 ]; then
+        print_error "Brak działających podów operatora!"
+        kubectl get pods -n cnpg-system
+        return 1
+    fi
+
+    # 5. Sprawdź webhook service
+    if ! kubectl get svc cnpg-webhook-service -n cnpg-system &> /dev/null; then
+        print_error "Service cnpg-webhook-service nie istnieje!"
+        print_info "Operator może być uszkodzony. Uruchom: ./reinstall-cloudnativepg.sh"
+        return 1
+    fi
+
+    # 6. Sprawdź endpoints webhook service
+    print_info "Sprawdzam endpoints webhook service..."
+    local endpoints_count=$(kubectl get endpoints cnpg-webhook-service -n cnpg-system -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | wc -w)
+    if [ "$endpoints_count" -eq 0 ]; then
+        print_warning "Webhook service nie ma endpoints! Czekam 30 sekund..."
+        sleep 30
+        endpoints_count=$(kubectl get endpoints cnpg-webhook-service -n cnpg-system -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null | wc -w)
+        if [ "$endpoints_count" -eq 0 ]; then
+            print_error "Webhook service nadal nie ma endpoints!"
+            print_info "Sprawdź pody: kubectl get pods -n cnpg-system"
+            print_info "Sprawdź endpoints: kubectl get endpoints cnpg-webhook-service -n cnpg-system"
+            return 1
+        fi
+    fi
+
+    # 7. Sprawdź ValidatingWebhookConfiguration
+    if ! kubectl get validatingwebhookconfiguration | grep -q cnpg; then
+        print_error "ValidatingWebhookConfiguration dla CNPG nie istnieje!"
+        print_info "Operator może być uszkodzony. Uruchom: ./reinstall-cloudnativepg.sh"
+        return 1
+    fi
+
+    # 8. Test webhook (opcjonalnie)
+    print_info "Testuję połączenie z webhook..."
+    if ! kubectl get validatingwebhookconfiguration -o json | grep -q "cnpg-webhook-service"; then
+        print_warning "Webhook configuration może być niepoprawny"
+    fi
+
+    print_success "CloudNativePG Operator jest gotowy!"
+    print_info "  - Namespace: cnpg-system"
+    print_info "  - Deployment: ready"
+    print_info "  - Pody: $pod_count running"
+    print_info "  - Webhook service: $endpoints_count endpoints"
+    print_info "  - Webhook configuration: OK"
+    return 0
 }
 
 # Funkcje główne
@@ -170,34 +249,38 @@ deploy_all() {
     # 4. PostgreSQL - sprawdź czy używać CloudNativePG czy StatefulSet
     if [ -f "manifest-10-postgres-cloudnativepg.yaml" ] && kubectl get crd clusters.postgresql.cnpg.io &> /dev/null 2>&1; then
         print_info "4/8 Tworzenie CloudNativePG Cluster PostgreSQL..."
-        
-        # Sprawdź czy webhook jest gotowy
-        if ! kubectl get svc cnpg-webhook-service -n cnpg-system &> /dev/null; then
-            print_warning "Webhook CloudNativePG nie jest jeszcze gotowy, czekam..."
-            WEBHOOK_READY=0
-            for i in {1..30}; do
-                if kubectl get svc cnpg-webhook-service -n cnpg-system &> /dev/null; then
-                    print_success "Webhook jest gotowy"
-                    WEBHOOK_READY=1
-                    break
-                fi
-                echo -n "."
-                sleep 2
-            done
-            echo ""
-            if [ $WEBHOOK_READY -eq 0 ]; then
-                print_warning "Webhook jeszcze nie jest gotowy, próbuję utworzyć Cluster..."
-            fi
+
+        # Kompleksowe sprawdzenie gotowości CloudNativePG
+        if ! check_cloudnativepg_ready; then
+            print_error "CloudNativePG Operator nie jest gotowy!"
+            print_info "Uruchom diagnostykę: ./check-cloudnativepg.sh"
+            print_info "Lub reinstaluj operator: ./reinstall-cloudnativepg.sh"
+            return 1
         fi
-        
+
         # Próbuj utworzyć Cluster
-        if kubectl apply -f manifest-10-postgres-cloudnativepg.yaml 2>&1 | grep -q "webhook.*not found"; then
-            print_error "Webhook CloudNativePG nie jest jeszcze gotowy!"
-            print_info "Poczekaj 1-2 minuty i uruchom ponownie:"
-            echo "  kubectl apply -f manifest-10-postgres-cloudnativepg.yaml"
-            print_info "Lub sprawdź status webhook:"
-            echo "  kubectl get svc -n cnpg-system | grep webhook"
-            echo "  kubectl get pods -n cnpg-system"
+        APPLY_OUTPUT=$(kubectl apply -f manifest-10-postgres-cloudnativepg.yaml 2>&1)
+        APPLY_EXIT=$?
+
+        if [ $APPLY_EXIT -ne 0 ]; then
+            print_error "Nie można utworzyć CloudNativePG Cluster!"
+            echo "$APPLY_OUTPUT"
+
+            if echo "$APPLY_OUTPUT" | grep -qE "webhook|admission|connection refused|no endpoints"; then
+                print_error "Problem z webhook! Sprawdzam szczegóły..."
+                print_info "Status operatora:"
+                kubectl get pods -n cnpg-system
+                print_info "Status webhook service:"
+                kubectl get svc cnpg-webhook-service -n cnpg-system 2>&1 || echo "Service nie istnieje!"
+                kubectl get endpoints cnpg-webhook-service -n cnpg-system 2>&1 || echo "Endpoints nie istnieją!"
+                print_info "Status webhook configuration:"
+                kubectl get validatingwebhookconfiguration | grep cnpg || echo "ValidatingWebhookConfiguration nie istnieje!"
+            fi
+
+            print_info "Spróbuj:"
+            echo "  1. Sprawdź logi operatora: kubectl logs -n cnpg-system deployment/cnpg-controller-manager"
+            echo "  2. Uruchom diagnostykę: ./check-cloudnativepg.sh"
+            echo "  3. Reinstaluj operator: ./reinstall-cloudnativepg.sh"
             return 1
         fi
         print_success "CloudNativePG Cluster utworzony"
