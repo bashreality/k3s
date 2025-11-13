@@ -47,7 +47,10 @@ spec:
       max_parallel_maintenance_workers: "2"
   
   # Image PostgreSQL
-  imageName: postgres:15-alpine
+  # CloudNativePG 1.22.0 wspiera postgres:15 (oficjalnie testowane)
+  # postgres:16 wymaga nowszej wersji operatora (1.23+)
+  # postgres:15-alpine ma uid 26 co powoduje "user does not exist"
+  imageName: postgres:15
   
   # Bootstrap - używa secret typu kubernetes.io/basic-auth
   # Secret musi mieć klucze: username i password
@@ -71,6 +74,12 @@ spec:
     limits:
       memory: "2Gi"
       cpu: "2000m"
+
+  # PostgresUID/GID - WORKAROUND dla CloudNativePG 1.22.0
+  # Operator 1.22.0 ma bug z detectowaniem user ID z obrazu postgres:15
+  # Defaultowo ustawia 26 (Alpine) zamiast 999 (Debian)
+  postgresUID: 999
+  postgresGID: 999
   
   # Backup (opcjonalne - można skonfigurować później)
   # backup:
