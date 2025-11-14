@@ -2,7 +2,7 @@
 
 # Skrypt zarządzający deploymentem PlusWorkflow + PostgreSQL w Kubernetes
 # Autor: Auto-generated
-# Wersja: 1.0
+# Wersja: 1.1
 
 set -e  # Zatrzymaj przy błędzie
 
