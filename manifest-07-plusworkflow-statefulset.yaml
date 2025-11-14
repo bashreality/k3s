@@ -25,7 +25,9 @@ spec:
             - '-c'
             - |
               echo "Czekam na PostgreSQL..."
-              until pg_isready -h postgres-0.postgres -U postgres; do
+              # CloudNativePG: postgres-cluster-rw
+              # StatefulSet: postgres-0.postgres
+              until pg_isready -h postgres-cluster-rw -U postgres; do
                 echo "PostgreSQL nie gotowy, czekam..."
                 sleep 3
               done
